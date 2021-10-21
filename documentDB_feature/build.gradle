@@ -1,0 +1,88 @@
+plugins {
+    id 'base'
+    id 'com.bmuschko.docker-remote-api' version '6.6.1'
+    id 'com.patdouble.awsecr' version '0.6.1'
+    id 'nebula.release' version '14.1.0'
+}
+
+wrapper {
+   gradleVersion = '6.2.2'
+   distributionUrl = "${artifactory_server}/gradle-distributions/gradle-${gradleVersion}-bin.zip"
+}
+
+ext {
+    verticalName = '###VERTICAL_NAME###'
+    awsAccount = '278833423079'
+    dockerRepo = "${project.ext.awsAccount}.dkr.ecr.us-east-1.amazonaws.com/${project.ext.verticalName}/${project.name}"
+    applicationName = "${project.name}".minus('-terraform')
+}
+
+import com.bmuschko.gradle.docker.tasks.image.Dockerfile
+import com.bmuschko.gradle.docker.tasks.image.DockerBuildImage
+import com.bmuschko.gradle.docker.tasks.image.DockerTagImage
+import com.bmuschko.gradle.docker.tasks.image.DockerPushImage
+import org.apache.tools.ant.filters.ReplaceTokens
+
+tasks.register("printVersion") {
+    group = 'Nebula Release'
+    doLast {
+        println "${project.version}"
+    }
+}
+
+task recordVersion(type: Exec) {
+    commandLine "echo Recording version ${project.version}".split()
+    ext.versionfile = new File("version.txt")
+    doLast {
+        versionfile.text = "${project.version}"
+    }
+}
+
+task terraformGet(type: Exec) {
+    workingDir "${project.projectDir}/terraform"
+    commandLine "terraform", "get"
+}
+
+task copyFiles(type: Copy) {
+    dependsOn terraformGet
+    from("${project.projectDir}") {
+        include 'terraform/**'
+        include 'terraform/.terraform/**'
+        include 'environments/**'
+    }
+
+    from("${project.projectDir}") {
+        include 'scripts/**'
+            filter(ReplaceTokens, tokens: [verticalName: project.ext.verticalName,
+                                           applicationName: project.ext.applicationName])
+    }
+
+    into "${project.buildDir}/docker/"
+}
+
+task createDockerfile(type: Dockerfile) {
+    group = 'docker'
+    dependsOn copyFiles
+    from '278833423079.dkr.ecr.us-east-1.amazonaws.com/plat/alpine-terragrunt:0.13.3'
+    label(['maintainer': 'Chewy Inc "releng@chewy.com"'])
+    copyFile('./terraform', '/config/')
+    copyFile('./scripts', '/config/')
+    copyFile('./environments', '/config/')
+    entryPoint("/config/entrypoint.bash")
+}
+
+task dockerBuildImage(type: DockerBuildImage) {
+    group = 'docker'
+    dependsOn createDockerfile
+    noCache = true
+    images.add("${project.ext.dockerRepo}:${project.version}")
+}
+
+task dockerPushImage(type: DockerPushImage) {
+    group = 'docker'
+    images = dockerBuildImage.images
+}
+
+build.dependsOn('dockerBuildImage')
+tasks.release.dependsOn('build')
+tasks.release.finalizedBy tasks.recordVersion
